@@ -18,93 +18,103 @@
 */
 #ifndef __TCP_SERVER_H
 #define __TCP_SERVER_H
+#include <cstdlib>
 #include <iostream>
-#include <assert.h>
-#include <boost/shared_ptr.hpp>
+#include <memory>
+#include <utility>
 #include <boost/asio.hpp>
-#include <boost/asio/placeholders.hpp>
-#include <boost/system/error_code.hpp>
-#include <boost/bind/bind.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/ptr_container/ptr_list.hpp> 
-#include <boost/asio/io_context.hpp>
-namespace mytcp{ 
-  using namespace boost::asio;
-  using namespace boost;
-  using namespace std;
-  using tcp = boost::asio::ip::tcp;
-  typedef std::shared_ptr<boost::asio::io_context> io_context_ptr;
-//---------------------------------
-  class listener : public std::enable_shared_from_this<listener> {
-     private:
-        boost::asio::io_context  _ioc;
-        tcp::acceptor         _acceptor(_ioc);
-        tcp::socket           _socket(_ioc);
-        ptr_list<io_context_ptr>   _ioc_list;
-        int thread_num = 4;
-     public:
-        listener(tcp::endpoint &endpoint) {
-           boost::system::error_code ec;
 
-           _acceptor.open( endpoint.protocol(), ec );
-           if( ec ) { on_fail( ec, "open" ); return; }
+using boost::asio::ip::tcp;
 
-           _acceptor.set_option( boost::asio::socket_base::reuse_address(true) );
+class session
+  : public std::enable_shared_from_this<session>
+{
+public:
+  session(tcp::socket socket)
+    : socket_(std::move(socket))
+  {
+  }
 
-           _acceptor.bind( endpoint, ec );
-           if( ec ) { on_fail( ec, "bind" ); return; }
+  void start()
+  {
+    do_read();
+  }
 
-           _acceptor.listen( boost::asio::socket_base::max_listen_connections, ec );
-           if( ec ) on_fail( ec, "listen" );
-        }
+private:
+  void do_read()
+  {
+    auto self(shared_from_this());
+    socket_.async_read_some(boost::asio::buffer(data_, max_length),
+        [this, self](boost::system::error_code ec, std::size_t length)
+        {
+          if (!ec)
+          {
+            do_write(length);
+          }
+        });
+  }
 
-        void run() {
-           assert(_acceptor.is_open());
-           do_accept();
-        }
+  void do_write(std::size_t length)
+  {
+    auto self(shared_from_this());
+    boost::asio::async_write(socket_, boost::asio::buffer(data_, length),
+        [this, self](boost::system::error_code ec, std::size_t /*length*/)
+        {
+          if (!ec)
+          {
+            do_read();
+          }
+        });
+  }
 
-        void do_accept() {
-           _acceptor.async_accept( _socket, [self=shared_from_this()]( boost::system::error_code ec ){ self->on_accept(ec); } );
-        }
+  tcp::socket socket_;
+  enum { max_length = 1024 };
+  char data_[max_length];
+};
 
-        void on_fail( boost::system::error_code ec, const char* what ) {
-           cout<<string(ec.message())<<" "<<string(what)<<"\n";
-        }
+class server
+{
+public:
+  server(boost::asio::io_context& io_context, short port)
+    : acceptor_(io_context, tcp::endpoint(tcp::v4(), port))
+  {
+    do_accept();
+  }
 
-        void on_accept( boost::system::error_code ec ){
-           if( ec ) {
-              if( ec == boost::system::errc::too_many_files_open )
-                 do_accept();
-              return;
-           }
-           std::shared_ptr<session> newsession;
-           try {
-              newsession = std::make_shared<session>(_socket);
-              std::shared_ptr<int> newint = std::make_shared<int>();
-           }
-           catch( std::exception& e ) {
-              _socket.close();
-           }
-           if( newsession ) {
-              newsession->run();
-           }
-           do_accept();
-       }
-  };
-//client for tcp------------------------------
-  class client{
-  };
+private:
+  void do_accept()
+  {
+    acceptor_.async_accept(
+        [this](boost::system::error_code ec, tcp::socket socket)
+        {
+          if (!ec)
+          {
+            std::make_shared<session>(std::move(socket))->start();
+          }
+
+          do_accept();
+        });
+  }
+
+  tcp::acceptor acceptor_;
+};
+
 //-------------------------------------------------
-    class Test{
-      public:
-        Test(){}
-        listener*                                    _listener;
-        tcp::endpoint endpoint;
-        void testListener() {
-          //endpoint = ip::tcp::endpoint(ip::address::from_string("127.0.0.1"),6688);
-          _listener = new listener(_ioc,endpoint);
-          _listener->run();
+  class Test{
+    public:
+      void testListener(int port=6688) {
+        try
+        {
+          boost::asio::io_context io_context;
+
+          server s(io_context, port);
+
+          io_context.run();
         }
-    };
-}
+        catch (std::exception& e)
+        {
+          std::cerr << "Exception: " << e.what() << "\n";
+        }
+      }
+  };
 #endif
